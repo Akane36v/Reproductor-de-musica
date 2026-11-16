@@ -1,0 +1,25 @@
+group = "dev.mimusica.flet_media_session"
+version = "0.1.0"
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "dev.mimusica.flet_media_session"
+    compileSdk = 35
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    defaultConfig {
+        minSdk = 24
+    }
+}

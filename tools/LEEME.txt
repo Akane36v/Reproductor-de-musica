@@ -1,0 +1,3 @@
+Coloca aquí ffmpeg.exe y ffprobe.exe (ambos son necesarios).
+Opcional: deno.exe, que yt-dlp usa para resolver los retos de JavaScript de YouTube.
+No subas estos archivos a git.

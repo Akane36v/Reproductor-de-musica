@@ -1,0 +1,26 @@
+# Configuracion para "flet build apk" (Android). Todo en ASCII a proposito.
+# En Windows se sigue usando requirements.txt y "flet pack".
+
+[project]
+name = "mimusica"
+version = "0.1.4"
+description = "Descargador de YouTube con enlaces de Spotify, biblioteca local y reproductor"
+requires-python = ">=3.10"
+dependencies = [
+    "flet==1.0.4",
+    "flet-audio==1.0.4",
+    "yt-dlp",
+    "mutagen",
+    "flet-media-session",
+]
+
+[tool.flet]
+build_number = 5
+product = "Mi Musica"
+org = "com.mimusica"
+company = "MiMusica"
+
+# Extension propia (servicio en primer plano + notificacion multimedia). Se instala desde su
+# rueda local; Flet convierte esta ruta (relativa a la app) en una ruta file:/// valida.
+[tool.flet.dev_packages]
+flet-media-session = "extensions/flet_media_session-0.1.0-py3-none-any.whl"

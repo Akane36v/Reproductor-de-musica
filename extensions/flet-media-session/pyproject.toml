@@ -1,0 +1,20 @@
+[project]
+name = "flet-media-session"
+version = "0.1.0"
+description = "Android media session for Flet: foreground service, media notification with controls, lock screen."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flet>=1.0.4",
+]
+
+[tool.setuptools.package-data]
+"flutter.flet_media_session" = [
+    "pubspec.yaml",
+    "lib/**",
+    "android/**",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,9 @@
+# Opcional (solo Windows): controles multimedia del sistema para la canción que suena
+# (panel de medios, pantalla de bloqueo y teclas multimedia).
+# Instalar con:  pip install -r requirements-multimedia.txt
+winrt-runtime~=3.2.1.0
+winrt-Windows.Foundation~=3.2.1.0
+winrt-Windows.Foundation.Collections~=3.2.1.0
+winrt-Windows.Storage.Streams~=3.2.1.0
+winrt-Windows.Media~=3.2.1.0
+winrt-Windows.Media.Playback~=3.2.1.0

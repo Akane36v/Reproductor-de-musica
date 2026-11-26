@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import random
 import threading
+import inspect
+from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import flet as ft
@@ -20,13 +23,17 @@ from mimusica.core.services.playlists import RepositorioPlaylists
 from mimusica.core.services.queue import ColaReproduccion
 from mimusica.core.urls import validar_url
 from mimusica.ui.player_views import Acciones, BarraEscritorio, MiniReproductor, ReproductorCompleto
+from mimusica.ui.covers import CachePortadas
 from mimusica.ui.theme import (
     ANCHO_MODO_ESCRITORIO, COLOR_ACENTO, COLOR_ERROR, COLOR_FONDO, COLOR_CABECERA,
-    COLOR_SUPERFICIE, COLOR_SUPERFICIE_2, COLOR_TEXTO, COLOR_TEXTO_SUAVE, relleno,
+    COLOR_SUPERFICIE, COLOR_SUPERFICIE_2, COLOR_TEXTO, COLOR_TEXTO_SUAVE,
+    COLOR_SELECCION, RADIO, crear_tema, estilizar_campo, relleno,
 )
 
 PAGINA = 60                  # filas que se crean de golpe en la lista (el resto al hacer scroll)
 LADO_PORTADA_LISTA = 44
+ESPERA_ESCANEO_S = 30
+ESPERA_INICIO_AUDIO_S = 15
 
 
 class EstadoApp:
@@ -47,20 +54,25 @@ class EstadoApp:
         self.ruta_resaltada: str | None = None
         self.filas: dict[str, tuple] = {}     # ruta -> (icono, título, caja de portada)
         self.con_portada: set[str] = set()
-        self.portadas: dict[str, bytes | None] = {}
+        self.portadas = CachePortadas()
+        self.indice_busqueda: dict[str, str] = {}
         self.generacion: int = 0              # invalida cargas de portadas de listas antiguas
         self.busqueda_pendiente: int = 0       # agrupa las pulsaciones de una misma búsqueda
         self.ancho_prev: float = 0.0          # para detectar giros de pantalla
         self.altura_max: float = 0.0          # mayor altura vista (referencia sin teclado)
         self.teclado: bool = False
         self.carga_visible: bool = False      # el indicador de carga está encendido en las vistas
+        self.conectada = True
+        self.escaneo = 0
+        self.carpeta_escaneada = None
 
 
 def main(page: ft.Page, plataforma: Plataforma):
     # ------------------------------------------------------------------ página
     page.title = "Mi Música"
     page.theme_mode = ft.ThemeMode.DARK
-    page.theme = ft.Theme(color_scheme_seed=COLOR_ACENTO, scaffold_bgcolor=COLOR_FONDO)
+    page.theme = crear_tema()
+    page.dark_theme = crear_tema()
     page.bgcolor = COLOR_FONDO
     page.padding = 0
     try:
@@ -73,11 +85,38 @@ def main(page: ft.Page, plataforma: Plataforma):
 
     est = EstadoApp(plataforma.carpeta_descargas())
     vistas: list = []   # barra de escritorio, mini y pantalla completa (se llenan más abajo)
+    lector_portadas = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portadas")
+    lector_biblioteca = ThreadPoolExecutor(max_workers=2, thread_name_prefix="biblioteca")
+    trabajos_portadas = []
+
+    def al_desconectar(e):
+        est.conectada = False
+        est.generacion += 1
+        est.escaneo += 1
+        lector_portadas.shutdown(wait=False, cancel_futures=True)
+        lector_biblioteca.shutdown(wait=False, cancel_futures=True)
+
+    def al_conectar(e):
+        nonlocal lector_portadas, lector_biblioteca
+        if est.conectada:
+            return
+        est.conectada = True
+        lector_portadas = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portadas")
+        lector_biblioteca = ThreadPoolExecutor(max_workers=2, thread_name_prefix="biblioteca")
+        anillo_escaneo.visible = False
+        refrescar_biblioteca()
+        ajustar_diseno()
+
+    page.on_disconnect = al_desconectar
+    page.on_connect = al_conectar
 
     def en_todas(metodo: str, *args):
         """Aplica la misma actualización a todas las vistas del reproductor."""
-        for v in vistas:
-            getattr(v, metodo)(*args)
+        for v in list(vistas):
+            try:
+                getattr(v, metodo)(*args)
+            except Exception as ex:
+                diagnostico.registrar("vista", f"{type(v).__name__}.{metodo}: {ex}")
 
     # ----------------------------------------------- actualización entre hilos
     def seguro(funcion, *args):
@@ -86,16 +125,29 @@ def main(page: ft.Page, plataforma: Plataforma):
         Es la ÚNICA vía por la que los hilos de fondo tocan la interfaz.
         """
         async def _ejecutar():
-            funcion(*args)
-            page.update()
+            if not est.conectada:
+                return
+            try:
+                funcion(*args)
+                page.update()
+            except Exception as ex:
+                diagnostico.registrar("interfaz", f"{funcion.__name__}: {ex}")
+        if not est.conectada:
+            return
         try:
             page.run_task(_ejecutar)
-        except Exception:
-            funcion(*args)
-            page.update()
+        except Exception as ex:
+            # Nunca modificar controles desde el hilo que descarga o escanea.
+            diagnostico.registrar("interfaz", f"No se pudo programar actualización: {ex}")
 
     # ---------------------------------------------------------- avisos y diálogos
     def abrir_dialogo(dialogo):
+        if isinstance(dialogo, ft.AlertDialog):
+            dialogo.bgcolor = COLOR_SUPERFICIE
+            dialogo.shape = ft.RoundedRectangleBorder(radius=20)
+            dialogo.scrollable = True
+        elif isinstance(dialogo, ft.SnackBar):
+            dialogo.bgcolor = COLOR_SUPERFICIE_2
         try:
             page.show_dialog(dialogo)
         except AttributeError:
@@ -120,7 +172,32 @@ def main(page: ft.Page, plataforma: Plataforma):
         abrir_dialogo(dialogo)
 
     def aviso(mensaje: str):
+        if repositorio.ultimo_error:
+            mensaje += "\n" + repositorio.ultimo_error
         abrir_dialogo(ft.SnackBar(ft.Text(mensaje)))
+
+    def protegido(funcion):
+        """Un fallo de un control deja disponibles los demás y queda registrado."""
+        def informar(ex):
+            est.arrastrando = False
+            diagnostico.registrar("acción", f"{funcion.__name__}: {type(ex).__name__}: {ex}")
+            if est.conectada:
+                alerta("No se pudo completar la acción", "Vuelve a intentarlo.\n\n" + str(ex)[:250])
+        if inspect.iscoroutinefunction(funcion):
+            @wraps(funcion)
+            async def asincrona(*args, **kwargs):
+                try:
+                    return await funcion(*args, **kwargs)
+                except Exception as ex:
+                    informar(ex)
+            return asincrona
+        @wraps(funcion)
+        def sincrona(*args, **kwargs):
+            try:
+                return funcion(*args, **kwargs)
+            except Exception as ex:
+                informar(ex)
+        return sincrona
 
     # ======================================================================
     # PANEL DE DESCARGAS
@@ -167,6 +244,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         on_submit=lambda e: iniciar_descarga(),
         on_change=al_cambiar_url,
     )
+    estilizar_campo(campo_url)
 
     icono_estado = ft.Icon(ft.Icons.INFO_OUTLINE, color=COLOR_TEXTO_SUAVE)
     texto_estado = ft.Text("Listo", color=COLOR_TEXTO_SUAVE, size=14, expand=True)
@@ -178,6 +256,7 @@ def main(page: ft.Page, plataforma: Plataforma):
     boton_cancelar = ft.OutlinedButton("Cancelar", icon=ft.Icons.CANCEL, visible=False, height=48,
                                        on_click=lambda e: gestor.cancelar())
 
+    @protegido
     async def cambiar_carpeta(e):
         ruta = await selector_carpeta.get_directory_path(dialog_title="Elige la carpeta de destino")
         if ruta:
@@ -240,6 +319,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         on_error=lambda m: seguro(al_fallar, m),
     )
 
+    @protegido
     def iniciar_descarga():
         if gestor.ocupado:
             return
@@ -264,7 +344,10 @@ def main(page: ft.Page, plataforma: Plataforma):
         barra_progreso.value = None  # animación indeterminada
         poner_estado("Conectando...", "descarga")
         page.update()
-        gestor.iniciar(url, est.carpeta)
+        try:
+            gestor.iniciar(url, est.carpeta)
+        except Exception as ex:
+            al_fallar(mensaje_error_amigable(ex))
 
     problema_entorno = gestor.problema_de_entorno()
     aviso_entorno = ft.Text("⚠ " + (problema_entorno or ""), size=12, color=COLOR_ERROR,
@@ -280,13 +363,13 @@ def main(page: ft.Page, plataforma: Plataforma):
 
     panel_descargas = ft.Container(
         bgcolor=COLOR_SUPERFICIE,
-        border_radius=4,
+        border_radius=RADIO,
         padding=16,
         content=ft.Column(
             spacing=14,
             scroll=ft.ScrollMode.AUTO,
             controls=[
-                ft.Column([ft.Text("Descargar música", size=20, weight=ft.FontWeight.BOLD),
+                ft.Column([ft.Text("Descargar música", size=24, weight=ft.FontWeight.BOLD),
                            ft.Text("YouTube · YouTube Music · Spotify", size=13,
                                    color=COLOR_TEXTO_SUAVE)], spacing=2),
                 campo_url,
@@ -344,6 +427,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         on_change=al_buscar,
         on_submit=lambda e: aplicar_filtro(),
     )
+    estilizar_campo(campo_buscar)
 
     def al_scroll(e):
         """Crea más filas cuando el usuario se acerca al final de la lista."""
@@ -371,6 +455,7 @@ def main(page: ft.Page, plataforma: Plataforma):
     def dialogo_nombre(titulo: str, inicial: str, al_aceptar):
         campo = ft.TextField(value=inicial, autofocus=True, hint_text="Nombre de la playlist",
                              border=ft.OutlineInputBorder(border_radius=12))
+        estilizar_campo(campo)
 
         def aceptar(e=None):
             nombre = (campo.value or "").strip()
@@ -466,7 +551,8 @@ def main(page: ft.Page, plataforma: Plataforma):
             content=ft.Text(f"¿Eliminar «{lista.nombre}»? Las canciones no se borran de tu biblioteca."),
             actions=[
                 ft.TextButton("Cancelar", on_click=lambda e2: cerrar_dialogo(dialogo)),
-                ft.FilledButton("Eliminar", on_click=confirmar),
+                ft.FilledButton("Eliminar", style=ft.ButtonStyle(bgcolor=COLOR_ERROR, color=COLOR_FONDO),
+                                on_click=confirmar),
             ],
         )
         abrir_dialogo(dialogo)
@@ -494,7 +580,7 @@ def main(page: ft.Page, plataforma: Plataforma):
                             "Esta acción no se puede deshacer."),
             actions=[
                 ft.TextButton("Cancelar", on_click=lambda e: cerrar_dialogo(dialogo)),
-                ft.FilledButton("Eliminar", style=ft.ButtonStyle(bgcolor=COLOR_ERROR), on_click=aceptar),
+                ft.FilledButton("Eliminar", style=ft.ButtonStyle(bgcolor=COLOR_ERROR, color=COLOR_FONDO), on_click=aceptar),
             ],
         )
         abrir_dialogo(dialogo)
@@ -586,12 +672,13 @@ def main(page: ft.Page, plataforma: Plataforma):
         portada = est.portadas.get(cancion.ruta)
         if portada:
             caja.content = ft.Image(src=portada, width=LADO_PORTADA_LISTA,
-                                    height=LADO_PORTADA_LISTA, fit=ft.BoxFit.COVER)
+                                    height=LADO_PORTADA_LISTA, cache_width=132, cache_height=132,
+                                    fit=ft.BoxFit.COVER)
             est.con_portada.add(cancion.ruta)
-        est.filas[cancion.ruta] = (icono, titulo, caja)
-        return ft.Container(
+        fila_visual = ft.Container(
             ink=True,
             border_radius=6,
+            bgcolor=COLOR_SELECCION if activa else None,
             padding=relleno(0, 6),
             on_click=pulsar_cancion(posicion),
             on_long_press=menu_cancion(cancion),
@@ -614,6 +701,8 @@ def main(page: ft.Page, plataforma: Plataforma):
                 ],
             ),
         )
+        est.filas[cancion.ruta] = (icono, titulo, caja, fila_visual)
+        return fila_visual
 
     def agregar_filas(cantidad: int) -> list[Cancion]:
         """Crea las siguientes 'cantidad' filas de la lista visible y devuelve esas canciones."""
@@ -629,19 +718,14 @@ def main(page: ft.Page, plataforma: Plataforma):
         for ruta, activa in ((est.ruta_resaltada, False), (ruta_nueva, True)):
             fila = est.filas.get(ruta) if ruta else None
             if fila:
-                icono, titulo, _caja = fila
+                icono, titulo, _caja, fondo = fila
+                fondo.bgcolor = COLOR_SELECCION if activa else None
                 titulo.color = COLOR_ACENTO if activa else COLOR_TEXTO
                 titulo.weight = ft.FontWeight.BOLD if activa else ft.FontWeight.NORMAL
                 if ruta not in est.con_portada:  # con portada no se muestra el icono
                     icono.name = ft.Icons.GRAPHIC_EQ if activa else ft.Icons.MUSIC_NOTE
                     icono.color = COLOR_ACENTO if activa else COLOR_TEXTO_SUAVE
         est.ruta_resaltada = ruta_nueva
-
-    def guardar_portada_en_cache(ruta: str, datos: bytes | None):
-        est.portadas[ruta] = datos
-        if len(est.portadas) > 300:
-            # Conserva las demás portadas al alcanzar el límite.
-            est.portadas.pop(next(iter(est.portadas)), None)
 
     def poner_portadas_lista(generacion: int, lote: list):
         if generacion != est.generacion:
@@ -650,7 +734,8 @@ def main(page: ft.Page, plataforma: Plataforma):
             fila = est.filas.get(ruta)
             if fila:
                 fila[2].content = ft.Image(src=datos, width=LADO_PORTADA_LISTA,
-                                           height=LADO_PORTADA_LISTA, fit=ft.BoxFit.COVER)
+                                           height=LADO_PORTADA_LISTA, cache_width=132, cache_height=132,
+                                           fit=ft.BoxFit.COVER)
                 est.con_portada.add(ruta)
 
     def cargar_portadas(canciones: list[Cancion], generacion: int):
@@ -664,9 +749,11 @@ def main(page: ft.Page, plataforma: Plataforma):
             for ruta in rutas:
                 if est.generacion != generacion:
                     return
-                if ruta not in est.portadas:
-                    guardar_portada_en_cache(ruta, leer_portada(ruta))
-                datos = est.portadas.get(ruta)
+                try:
+                    datos = est.portadas.leer(ruta, leer_portada)
+                except Exception as ex:
+                    diagnostico.registrar("portada", f"{ruta}: {ex}")
+                    continue
                 if datos:
                     lote.append((ruta, datos))
                 if len(lote) >= 8:
@@ -675,7 +762,9 @@ def main(page: ft.Page, plataforma: Plataforma):
             if lote:
                 seguro(poner_portadas_lista, generacion, lote)
 
-        threading.Thread(target=tarea, daemon=True).start()
+        trabajos_portadas[:] = [trabajo for trabajo in trabajos_portadas if not trabajo.done()]
+        if est.conectada:
+            trabajos_portadas.append(lector_portadas.submit(tarea))
 
     def aplicar_filtro():
         est.busqueda_pendiente += 1
@@ -686,9 +775,11 @@ def main(page: ft.Page, plataforma: Plataforma):
         consulta = (campo_buscar.value or "").strip().lower()
         est.visibles = [
             c for c in base
-            if not consulta or consulta in f"{c.titulo} {c.artista} {c.album}".lower()
+            if not consulta or consulta in est.indice_busqueda.get(c.ruta, "")
         ]
         est.generacion += 1
+        for trabajo in trabajos_portadas:
+            trabajo.cancel()
         est.filas.clear()
         est.con_portada.clear()
         est.mostrando = 0
@@ -715,28 +806,42 @@ def main(page: ft.Page, plataforma: Plataforma):
         cargar_portadas(primeras, est.generacion)
         page.update()
 
-    def aplicar_biblioteca(canciones: list):
+    def aplicar_biblioteca(canciones: list, solicitud=None):
+        if solicitud is not None and solicitud != est.escaneo:
+            return
         anillo_escaneo.visible = False
         est.biblioteca = canciones
+        est.indice_busqueda = {c.ruta: f"{c.titulo} {c.artista} {c.album}".lower() for c in canciones}
+        est.portadas.invalidar()
         aplicar_filtro()
 
     def refrescar_biblioteca(e=None):
         """Escanea la carpeta en un hilo para no bloquear la interfaz."""
-        if anillo_escaneo.visible:
+        if not est.conectada or (anillo_escaneo.visible and est.carpeta_escaneada == est.carpeta):
             return
+        est.escaneo += 1
+        solicitud = est.escaneo
+        est.carpeta_escaneada = est.carpeta
         texto_contador.value = "Escaneando..."
         anillo_escaneo.visible = True
         page.update()
         carpeta = est.carpeta
 
-        def tarea():
+        async def tarea():
             try:
-                canciones = escanear_biblioteca(carpeta, plataforma.extensiones)
-            except Exception:
-                canciones = []
-            seguro(aplicar_biblioteca, canciones)
+                futuro = lector_biblioteca.submit(escanear_biblioteca, carpeta, plataforma.extensiones)
+                canciones = await asyncio.wait_for(asyncio.wrap_future(futuro), ESPERA_ESCANEO_S)
+                if est.conectada:
+                    aplicar_biblioteca(canciones, solicitud)
+            except Exception as ex:
+                if est.conectada and solicitud == est.escaneo:
+                    anillo_escaneo.visible = False
+                    diagnostico.registrar("biblioteca", f"Error de escaneo: {type(ex).__name__}: {ex}")
+                    texto_contador.value = "No se pudo actualizar. Vuelve a intentarlo."
+                    aviso("Se conserva la biblioteca anterior. Pulsa Actualizar para reintentar.")
+                    page.update()
 
-        threading.Thread(target=tarea, daemon=True).start()
+        page.run_task(tarea)
 
     botones_reproduccion = ft.Row(
         visible=False,
@@ -757,11 +862,9 @@ def main(page: ft.Page, plataforma: Plataforma):
         ft.IconButton(icon=ft.Icons.ADD, tooltip="Nueva playlist", on_click=lambda e: nueva_playlist()),
     ])
     panel_biblioteca = ft.Container(
-        bgcolor=COLOR_FONDO,
-        border_radius=0,
+        bgcolor=COLOR_SUPERFICIE,
+        border_radius=RADIO,
         padding=ft.Padding(left=16, right=16, top=12, bottom=8),
-        gradient=ft.LinearGradient(begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER,
-                                   colors=["#352918", COLOR_FONDO, COLOR_FONDO], stops=[0, 0.24, 1]),
         content=ft.Column(
             expand=True,
             spacing=10,
@@ -818,6 +921,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         en_todas("tiempo", int(ms))
         page.update()
 
+    @protegido
     def al_soltar_barra(ms: float):
         if motor and not est.cola.vacia:
             try:
@@ -828,6 +932,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         en_todas("progreso", int(ms), est.duracion_ms)
         page.update()
 
+    @protegido
     def al_cambiar_volumen(v: float):
         if motor:
             motor.poner_volumen(v)
@@ -836,6 +941,7 @@ def main(page: ft.Page, plataforma: Plataforma):
 
     bloqueo_reproduccion = asyncio.Lock()
     solicitud_reproduccion = 0
+    inicio_motor_pendiente = None
 
     async def reproducir_actual():
         nonlocal solicitud_reproduccion
@@ -854,6 +960,7 @@ def main(page: ft.Page, plataforma: Plataforma):
                 est.cargando_pista = False
 
     async def cargar_actual(solicitud):
+        nonlocal inicio_motor_pendiente
         """Reproduce la canción que indica la cola. Primero el audio; la portada después."""
         cancion = est.cola.actual()
         if cancion is None:
@@ -861,13 +968,35 @@ def main(page: ft.Page, plataforma: Plataforma):
         if motor is None:
             alerta("Audio no disponible", error_audio or "No se pudo iniciar el motor de audio.")
             return
+        if inicio_motor_pendiente is not None and not inicio_motor_pendiente.done():
+            aviso("El motor aún está terminando la operación anterior. Puedes seguir usando la biblioteca y volver a intentarlo.")
+            return
         if not Path(cancion.ruta).is_file():
             alerta("Archivo no encontrado", f"No existe:\n{cancion.ruta}\n\nActualiza la biblioteca.")
             return
         est.cargando_pista = True
         diagnostico.registrar("app", f"reproducir: {cancion.titulo}")
+        cancelada = threading.Event()
+        def iniciar_motor():
+            try:
+                motor.reproducir(cancion.ruta)
+                if cancelada.is_set():
+                    motor.detener()
+            except Exception:
+                if not cancelada.is_set():
+                    raise
+
+        def consumir_resultado(futuro):
+            try:
+                futuro.result()
+            except Exception as ex:
+                diagnostico.registrar("audio", f"Inicio fallido: {ex}")
         try:
-            await asyncio.to_thread(motor.reproducir, cancion.ruta)
+            inicio_motor_pendiente = asyncio.get_running_loop().run_in_executor(None, iniciar_motor)
+            inicio_motor_pendiente.add_done_callback(consumir_resultado)
+            # Un hilo nativo no se puede cancelar: se mantiene aislado hasta que termine,
+            # sin admitir otra carga simultánea y deteniendo cualquier inicio tardío.
+            await asyncio.wait_for(asyncio.shield(inicio_motor_pendiente), ESPERA_INICIO_AUDIO_S)
             if solicitud != solicitud_reproduccion:
                 motor.detener()
                 return
@@ -877,17 +1006,28 @@ def main(page: ft.Page, plataforma: Plataforma):
             poner_carga(bool(getattr(motor, "cargando", lambda: False)()))
             resaltar(cancion.ruta)
             ajustar_diseno()  # muestra el mini-reproductor la primera vez
-        except Exception as ex:  # el reproductor nunca debe congelar ni cerrar la app
+        except Exception as ex:
+            cancelada.set()
             poner_reproduciendo(False)
             page.update()
-            alerta("No se pudo reproducir", f"{cancion.titulo}\n\n{ex}")
+            detalle = "El motor tardó demasiado en responder. Puedes volver a intentarlo cuando termine." if isinstance(ex, TimeoutError) else str(ex)
+            alerta("No se pudo reproducir", f"{cancion.titulo}\n\n{detalle}")
             return
         # La portada se lee después de arrancar el audio para no retrasar el cambio de canción
-        if cancion.ruta not in est.portadas:
-            guardar_portada_en_cache(cancion.ruta, await asyncio.to_thread(leer_portada, cancion.ruta))
-        if est.cola.actual() is cancion:  # por si ya cambió de canción mientras tanto
-            en_todas("portada", est.portadas.get(cancion.ruta))
-            page.update()
+        def mostrar_portada(datos):
+            if solicitud == solicitud_reproduccion and est.cola.actual() is cancion:
+                en_todas("portada", datos)
+
+        def leer_portada_actual():
+            try:
+                datos = est.portadas.leer(cancion.ruta, leer_portada)
+            except Exception as ex:
+                diagnostico.registrar("portada", f"{cancion.ruta}: {ex}")
+                datos = None
+            seguro(mostrar_portada, datos)
+
+        if est.conectada:
+            trabajos_portadas.append(lector_portadas.submit(leer_portada_actual))
 
     async def pista_terminada():
         """Pasa sola a la siguiente (respeta el modo aleatorio); al final de la cola, se detiene."""
@@ -906,6 +1046,7 @@ def main(page: ft.Page, plataforma: Plataforma):
     async def bucle_reproduccion():
         """Actualiza el progreso y detecta el fin de la pista (4 veces por segundo)."""
         ultimo_ms = -1
+        fallos_seguidos = 0
         while True:
             await asyncio.sleep(0.25)
             if motor is None or est.cargando_pista:
@@ -942,10 +1083,25 @@ def main(page: ft.Page, plataforma: Plataforma):
                     if ms != ultimo_ms:
                         ultimo_ms = ms
                         en_todas("progreso", ms, est.duracion_ms)
-                        page.update()
-            except Exception:
-                pass  # un fallo puntual no debe detener el bucle
+                        for vista in (barra_pc, mini, completo):
+                            if vista.contenedor.visible:
+                                vista.contenedor.update()
+                fallos_seguidos = 0
+            except Exception as ex:
+                fallos_seguidos += 1
+                if fallos_seguidos == 1:
+                    diagnostico.registrar("reproducción", f"Error de actualización: {ex}")
+                if fallos_seguidos >= 3:
+                    poner_reproduciendo(False)
+                    try:
+                        motor.detener()
+                    except Exception as error:
+                        diagnostico.registrar("reproducción", f"No se pudo detener: {error}")
+                    aviso("El reproductor dejó de responder. Pulsa Reproducir para volver a intentarlo.")
+                    page.update()
+                    fallos_seguidos = 0
 
+    @protegido
     async def alternar_reproduccion(e):
         if motor is None:
             alerta("Audio no disponible", error_audio or "No se pudo iniciar el motor de audio.")
@@ -967,6 +1123,7 @@ def main(page: ft.Page, plataforma: Plataforma):
             poner_reproduciendo(True)
             page.update()
 
+    @protegido
     async def detener(e):
         nonlocal solicitud_reproduccion
         solicitud_reproduccion += 1
@@ -982,6 +1139,7 @@ def main(page: ft.Page, plataforma: Plataforma):
         if est.cola.siguiente() is not None:
             await reproducir_actual()
 
+    @protegido
     async def anterior(e):
         """Si ya sonaron más de 3 s reinicia la canción; si no, vuelve a la anterior."""
         if est.cola.vacia:
@@ -1038,6 +1196,7 @@ def main(page: ft.Page, plataforma: Plataforma):
                 ajustar_diseno()
 
     # ---- controles multimedia del sistema (panel de medios / teclas multimedia) ----
+    @protegido
     async def desde_multimedia(accion: str, valor: int = 0):
         diagnostico.registrar("notificación", f"botón {accion}")
         if accion == "seek":
@@ -1102,7 +1261,7 @@ def main(page: ft.Page, plataforma: Plataforma):
 
     barra_navegacion = ft.NavigationBar(
         bgcolor=COLOR_FONDO,
-        indicator_color="transparent",
+        indicator_color=COLOR_SELECCION,
         height=64,
         selected_index=0,
         on_change=cambiar_vista,
@@ -1125,9 +1284,8 @@ def main(page: ft.Page, plataforma: Plataforma):
         bgcolor=COLOR_CABECERA,
         padding=relleno(12, 4),
         content=ft.Row([
-            ft.Container(width=40),
-            ft.Text("Mi Música", size=14, weight=ft.FontWeight.W_600, expand=True,
-                    text_align=ft.TextAlign.CENTER),
+            ft.Icon(ft.Icons.LIBRARY_MUSIC, color=COLOR_ACENTO, size=24),
+            ft.Text("Mi Música", size=18, weight=ft.FontWeight.BOLD, expand=True),
             ft.IconButton(icon=ft.Icons.BUG_REPORT, icon_size=20, icon_color=COLOR_TEXTO_SUAVE,
                           tooltip="Diagnóstico", on_click=lambda e: abrir_diagnostico(e)),
         ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1268,3 +1426,7 @@ def main(page: ft.Page, plataforma: Plataforma):
     if problema_entorno:
         alerta("Falta una herramienta",
                problema_entorno + "\n\nPodrás reproducir tu biblioteca, pero no descargar.")
+    if repositorio.recuperado:
+        aviso("Se recuperaron tus playlists desde el respaldo del último guardado.")
+    elif repositorio.ultimo_error:
+        aviso("Revisa tus playlists antes de guardar cambios.")

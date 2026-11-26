@@ -94,6 +94,7 @@ class DescargadorYtDlpAndroid:
         self._on_error = on_error
         self._cancelar = threading.Event()
         self._hilo: threading.Thread | None = None
+        self._inicio = threading.Lock()
 
     def problema_de_entorno(self) -> str | None:
         return None  # no se necesita FFmpeg
@@ -103,11 +104,24 @@ class DescargadorYtDlpAndroid:
         return self._hilo is not None and self._hilo.is_alive()
 
     def iniciar(self, url: str, destino: Path):
-        if self.ocupado:
-            return
-        self._cancelar.clear()
-        self._hilo = threading.Thread(target=self._trabajo, args=(url, destino), daemon=True)
-        self._hilo.start()
+        with self._inicio:
+            if self.ocupado:
+                return
+            self._cancelar.clear()
+            self._hilo = threading.Thread(target=self._ejecutar, args=(url, destino), daemon=True)
+            try:
+                self._hilo.start()
+            except Exception:
+                self._hilo = None
+                raise
+
+    def _ejecutar(self, url, destino):
+        try:
+            self._trabajo(url, destino)
+        except DownloadCancelled:
+            self._on_fin(0, [], True)
+        except Exception as ex:
+            self._on_error(mensaje_error_amigable(ex))
 
     def cancelar(self):
         self._cancelar.set()

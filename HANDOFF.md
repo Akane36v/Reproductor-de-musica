@@ -1,3 +1,21 @@
+## Actualización del 25 de noviembre de 2026 · versión 0.1.6
+
+Recuperación y correcciones comprobadas con 55 pruebas. La UI conserva la biblioteca ante errores de escaneo, limita la espera a 30 segundos y descarta respuestas obsoletas al cambiar de carpeta. Dos trabajadores acotan la concurrencia. Al reconectar se recrean los ejecutores; callbacks de sesiones desconectadas se descartan y nunca se ejecuta una actualización de controles como respaldo desde el hilo de descarga.
+
+Las portadas usan deduplicación por archivo en vez de un bloqueo global de lectura; los cambios de canción ya no esperan la portada dentro del bloqueo de reproducción. Fallos de lectura se registran y liberan las esperas. El inicio del motor está acotado a 15 segundos, se mantiene aislada una operación nativa aún pendiente y se detiene un inicio tardío para impedir cargas superpuestas. Tres errores consecutivos de consulta detienen el estado de reproducción y permiten reintentar. Las excepciones de controles y vistas quedan registradas; un fallo de una vista no interrumpe la actualización de las otras.
+
+Playlists: validación de estructura JSON, escritura atómica con temporal único y fsync, respaldo del estado anterior válido, recuperación automática desde .json.bak y errores de guardado visibles. RLock serializa las mutaciones concurrentes. La biblioteca normaliza duraciones NaN, infinitas y negativas y tolera que un archivo desaparezca durante el escaneo. Los descargadores serializan el inicio y capturan excepciones externas al cuerpo habitual de descarga.
+
+Se simularon portadas detenidas, motor nativo sin respuesta y recuperación posterior, escaneos lentos/obsoletos, desconexión y reconexión, falta de permisos, 80 escrituras simultáneas de canciones y 40 solicitudes de descarga simultáneas por plataforma. Se conservaron las pruebas previas de reproducción y Spotify. No se compiló Android ni se probó esta versión en el teléfono. Python no puede cancelar por la fuerza una llamada nativa de un hilo, ni estas simulaciones garantizan ausencia de bloqueos de controladores o del sistema operativo.
+
+## Actualización del 25 de noviembre de 2026 · versión 0.1.5
+
+Se trabajó sobre la copia indicada por el usuario en Version_0.1.4/Reproductor-de-musica. La versión 0.1.5 centraliza el tema en ui/theme.py: superficies neutras, acento verde, bordes y radios consistentes, campos con foco verde, diálogos oscuros, botones de confirmación verdes y acciones destructivas rojas. Se aplica explícitamente también como dark_theme. Biblioteca, descargas, navegación y las tres vistas del reproductor usan esta paleta. Los diálogos de archivos del sistema conservan su apariencia nativa.
+
+Rendimiento: ui/covers.py limita la caché de portadas por memoria (24 MiB) y cantidad (300), reutiliza las lecturas simultáneas y conserva las portadas usadas recientemente. El acceso a los datos no espera a que termine una lectura de disco. Dos trabajadores procesan portadas; los trabajos pendientes de listas obsoletas se cancelan. El escaneo invalida la caché y prepara un índice de búsqueda por ruta. El progreso actualiza los contenedores del reproductor en vez de la página completa. Se corrige el progreso indeterminado del mini al terminar la carga.
+
+Validación: 35 pruebas automáticas aprobadas, incluidas reproducción Android y Spotify, límites de caché, lectura concurrente, invalidación durante una lectura, búsqueda rápida, paginación, playlists y construcción de diálogos. Se revisaron en Windows las distribuciones móvil y escritorio con datos de ejemplo: biblioteca, nueva playlist, opciones de canción, descargas, mini y reproductor ampliado. No se compiló Android. Queda pendiente validar en el teléfono.
+
 ## Actualización del 15 de noviembre de 2026 · versión 0.1.4
 
 Se añadieron enlaces de canciones y playlists públicas de Spotify al panel Descargar, en Windows y Android. `adapters/spotify.py` consulta los metadatos públicos del reproductor insertado de Spotify y busca coincidencias en YouTube usando yt-dlp. No requiere cuenta ni claves. Los nombres y etiquetas conservan título y artista de Spotify; el archivo y la portada proceden de YouTube. Se compara título, artista y duración y se evitan versiones no solicitadas. No se extrae audio de Spotify.

@@ -111,7 +111,7 @@ class _ConBarra:
 # ==========================================================================
 class BarraEscritorio(_ConBarra):
     def __init__(self, acc: Acciones):
-        self._portada = _Portada(52, 3)
+        self._portada = _Portada(52, 8)
         self.titulo = ft.Text("Nada en reproducción", weight=ft.FontWeight.BOLD, max_lines=1,
                               overflow=ft.TextOverflow.ELLIPSIS)
         self.artista = ft.Text("Elige una canción de la biblioteca", size=12, color=COLOR_TEXTO_SUAVE,
@@ -141,7 +141,7 @@ class BarraEscritorio(_ConBarra):
         )
         derecha = ft.Row([self.icono_vol, self.slider_vol], alignment=ft.MainAxisAlignment.END, spacing=0)
         self.contenedor = ft.Container(
-            bgcolor=COLOR_FONDO, padding=relleno(16, 8),
+            bgcolor=COLOR_SUPERFICIE, border_radius=12, margin=relleno(8, 4), padding=relleno(16, 8),
             content=ft.Row([ft.Container(izquierda, expand=3), ft.Container(centro, expand=4),
                             ft.Container(derecha, expand=3)],
                            vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=12))
@@ -180,7 +180,7 @@ class MiniReproductor:
         self.artista = ft.Text("", size=11, color=COLOR_TEXTO_SUAVE, max_lines=1,
                                overflow=ft.TextOverflow.ELLIPSIS)
         self.boton_play = _boton(ft.Icons.PLAY_ARROW, "Reproducir / Pausar", acc.alternar, 30)
-        self.barra = ft.ProgressBar(value=0, color=COLOR_TEXTO, bgcolor="#414752", bar_height=2)
+        self.barra = ft.ProgressBar(value=0, color=COLOR_ACENTO, bgcolor=COLOR_SUPERFICIE_2, bar_height=3)
         self.contenedor = ft.Container(
             visible=False, bgcolor=COLOR_MINI, border_radius=10,
             margin=ft.Margin.symmetric(horizontal=8, vertical=2),
@@ -195,18 +195,21 @@ class MiniReproductor:
                 self.barra,
             ]))
         self._max_ms = 1000
+        self._ultimo_progreso = 0
 
     def pista(self, titulo: str, artista: str, duracion_s: float):
         self.titulo.value, self.artista.value = titulo, artista
         self._portada.poner(None)
         self._max_ms = max(int(duracion_s * 1000), 1000)
         self.barra.value = 0
+        self._ultimo_progreso = 0
 
     def portada(self, datos): self._portada.poner(datos)
 
     def progreso(self, ms: int, max_ms: int):
         self._max_ms = max(max_ms, 1000)
         self.barra.value = min(max(ms / self._max_ms, 0), 1)
+        self._ultimo_progreso = self.barra.value
 
     def tiempo(self, ms: int): pass
 
@@ -220,6 +223,8 @@ class MiniReproductor:
         """Mientras el motor carga la pista, la barrita fina se anima (indeterminada)."""
         if activo:
             self.barra.value = None
+        else:
+            self.barra.value = self._ultimo_progreso
 
 
 # ==========================================================================
@@ -227,7 +232,7 @@ class MiniReproductor:
 # ==========================================================================
 class ReproductorCompleto(_ConBarra):
     def __init__(self, acc: Acciones):
-        self._portada = _Portada(280, 4, 80)
+        self._portada = _Portada(280, 12, 80)
         self.titulo = ft.Text("Nada en reproducción", size=22, weight=ft.FontWeight.BOLD,
                               text_align=ft.TextAlign.LEFT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
         self.artista = ft.Text("", size=15, color=COLOR_TEXTO_SUAVE, text_align=ft.TextAlign.LEFT,
@@ -255,8 +260,8 @@ class ReproductorCompleto(_ConBarra):
                 ft.Container(height=6),
                 self._portada.caja,
                 ft.Container(height=10),
-                ft.Container(ft.Column([self.titulo, self.artista], spacing=2,
-                                       horizontal_alignment=ft.CrossAxisAlignment.START),
+                ft.Container(ft.Row([ft.Column([self.titulo, self.artista], spacing=2, expand=True,
+                                       horizontal_alignment=ft.CrossAxisAlignment.START)]),
                              padding=relleno(24, 0)),
                 ft.Container(ft.Row([self.t_actual, self.slider, self.t_total],
                                     vertical_alignment=ft.CrossAxisAlignment.CENTER),

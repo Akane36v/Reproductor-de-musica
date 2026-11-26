@@ -9,6 +9,14 @@ Aplicación para **descargar audio de YouTube y YouTube Music**, importar enlace
 
 ## Características
 
+La versión **0.1.6** añade recuperación ante fallos: un escaneo fallido conserva la biblioteca y se puede reintentar; los escaneos tienen un límite de 30 segundos y descartan resultados de carpetas anteriores. El inicio del motor tiene un límite de 15 segundos para liberar la interfaz. Si una operación nativa sigue pendiente, se evita superponer otra y se detiene cualquier inicio tardío. Las portadas se cargan sin retener el cambio de canción. La reconexión recrea los trabajadores de biblioteca y portadas.
+
+Las playlists se escriben de forma atómica con vaciado a disco y respaldo `.json.bak` del estado anterior guardado. Si el archivo principal está dañado, se intenta recuperar el respaldo. Los errores de escritura se muestran y los cambios permanecen en memoria para un guardado posterior. Las descargas simultáneas se agrupan en un único trabajo por descargador y un fallo inesperado del hilo se comunica a la interfaz.
+
+La validación incluye **55 pruebas**, con fallos de disco, archivo JSON truncado, portadas lentas, reconexión, callbacks tardíos, motor que no responde, guardado concurrente y pulsaciones simultáneas. Son pruebas automatizadas con simulaciones; la validación en un teléfono Android sigue siendo necesaria. Los límites de tiempo no pueden terminar por la fuerza un hilo atascado dentro de una biblioteca nativa o del sistema operativo.
+
+La versión **0.1.5** unifica el tema oscuro y verde en biblioteca, descargas, reproductores, menús, avisos y formularios. Incluye campos de texto consistentes, acciones destructivas en rojo y una marca visible de la canción activa. La búsqueda utiliza un índice preparado durante el escaneo; las portadas comparten una caché de hasta 24 MiB y 300 entradas, con dos trabajadores y cancelación de tareas pendientes al cambiar de lista. El progreso refresca solamente las vistas del reproductor.
+
 - **Descargas:** videos, canciones, shorts, listas de reproducción y álbumes de YouTube y YouTube Music (`youtube.com`, `youtu.be`, `music.youtube.com`).
 - **Enlaces de Spotify:** canciones y playlists públicas de menos de 100 canciones, con búsqueda por título, artista y duración, progreso por pista y cancelación. Usa el audio equivalente de YouTube y conserva el título y artista de Spotify.
 - **Etiquetas y portada:** título, artista, álbum y carátula incrustados en el archivo.

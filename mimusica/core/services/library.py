@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 
 from mutagen import File as MutagenFile
@@ -23,6 +24,8 @@ def leer_cancion(ruta: Path) -> Cancion:
         audio = MutagenFile(str(ruta), easy=True)
         if audio is not None:
             duracion = float(getattr(audio.info, "length", 0) or 0)
+            if not math.isfinite(duracion) or duracion < 0:
+                duracion = 0.0
             etiquetas = audio.tags
             titulo = _primero(etiquetas, "title") or titulo
             artista = _primero(etiquetas, "artist") or _primero(etiquetas, "albumartist") or artista
@@ -40,11 +43,11 @@ def escanear_biblioteca(carpeta: Path, extensiones: tuple[str, ...] = (".mp3",))
     archivos: list[tuple[float, Path]] = []
     with os.scandir(carpeta) as it:
         for entrada in it:
-            if entrada.is_file() and entrada.name.lower().endswith(extensiones):
-                try:
+            try:
+                if entrada.is_file() and entrada.name.lower().endswith(extensiones):
                     archivos.append((entrada.stat().st_mtime, Path(entrada.path)))
-                except OSError:
-                    continue
+            except OSError:
+                continue
     archivos.sort(key=lambda x: x[0], reverse=True)
     return [leer_cancion(ruta) for _, ruta in archivos]
 

@@ -3,7 +3,7 @@
 
 [project]
 name = "mimusica"
-version = "0.1.4"
+version = "0.1.6"
 description = "Descargador de YouTube con enlaces de Spotify, biblioteca local y reproductor"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.flet]
-build_number = 5
+build_number = 7
 product = "Mi Musica"
 org = "com.mimusica"
 company = "MiMusica"

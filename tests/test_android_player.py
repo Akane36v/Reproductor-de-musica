@@ -74,6 +74,18 @@ class PaginaSimulada:
 
 
 class PruebasAudio(unittest.IsolatedAsyncioTestCase):
+    async def test_comando_nativo_que_no_responde_expira_y_permite_nueva_pista(self):
+        async def bloqueado(*args, **kwargs):
+            await asyncio.Event().wait()
+        with patch.object(AudioSimulado, 'play', bloqueado), patch.object(player, 'ESPERA_COMANDO_S', 0.02):
+            await self.iniciar()
+        self.assertTrue(self.motor.tomar_error())
+        self.assertFalse(self.motor.activo)
+        self.motor.reproducir('segunda.m4a')
+        await self.pagina.terminar()
+        self.assertTrue(self.motor.activo)
+        self.assertFalse(self.motor._operacion.locked())
+
     def setUp(self):
         self.parches = [
             patch.object(player.fta, "Audio", AudioSimulado),
